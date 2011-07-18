@@ -31,18 +31,27 @@ static char * ngx_http_secure_download_merge_loc_conf (ngx_conf_t*, void*, void*
 static ngx_int_t ngx_http_secure_download_add_variables(ngx_conf_t *cf);
 static ngx_int_t ngx_http_secure_download_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data);
 static char * ngx_conf_set_path_mode(ngx_conf_t*, ngx_command_t*, void*);
+static char * ngx_conf_set_url_format(ngx_conf_t*, ngx_command_t*, void*);
 
 static char *ngx_http_secure_download_secret(ngx_conf_t *cf, void *post, void *data);
 static ngx_conf_post_handler_pt  ngx_http_secure_download_secret_p =
     ngx_http_secure_download_secret;
+
+static char *ngx_http_secure_download_prefix(ngx_conf_t *cf, void *post, void *data);
+static ngx_conf_post_handler_pt  ngx_http_secure_download_prefix_p =
+    ngx_http_secure_download_prefix;
 
 typedef struct {
   ngx_flag_t enable;
   ngx_flag_t path_mode;
   ngx_flag_t url_format;
   ngx_str_t secret;
+  ngx_str_t prefix;
+  ngx_uint_t period;
   ngx_array_t  *secret_lengths;
   ngx_array_t  *secret_values;
+  ngx_array_t  *prefix_lengths;
+  ngx_array_t  *prefix_values;
 } ngx_http_secure_download_loc_conf_t;
 
 static ngx_command_t ngx_http_secure_download_commands[] = {
@@ -77,6 +86,22 @@ static ngx_command_t ngx_http_secure_download_commands[] = {
     NGX_HTTP_LOC_CONF_OFFSET,
     offsetof(ngx_http_secure_download_loc_conf_t, secret),
     &ngx_http_secure_download_secret_p
+  },
+  {
+    ngx_string("secure_download_prefix"),
+    NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+    ngx_conf_set_str_slot,
+    NGX_HTTP_LOC_CONF_OFFSET,
+    offsetof(ngx_http_secure_download_loc_conf_t, prefix),
+    &ngx_http_secure_download_prefix_p
+  },
+  {
+    ngx_string("secure_download_period"),
+    NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+    ngx_conf_set_num_slot,
+    NGX_HTTP_LOC_CONF_OFFSET,
+    offsetof(ngx_http_secure_download_loc_conf_t, period),
+    NULL
   }
 };
 
@@ -137,11 +162,11 @@ static char * ngx_conf_set_url_format(ngx_conf_t *cf, ngx_command_t *cmd, void *
   ngx_http_secure_download_loc_conf_t *sdlc = conf;
   if ((d[1].len == 5) && (strncmp((char*)d[1].data, "nginx", 5) == 0))
   {
-    sdlc->path_mode = URL_FORMAT_NGINX;
+    sdlc->url_format = URL_FORMAT_NGINX;
   }
   else if((d[1].len == 8) && (strncmp((char*)d[1].data, "lighttpd", 8) == 0))
   {
-    sdlc->path_mode = URL_FORMAT_LIGHTTPD;
+    sdlc->url_format = URL_FORMAT_LIGHTTPD;
   }
   else
   {
@@ -164,6 +189,9 @@ static void * ngx_http_secure_download_create_loc_conf(ngx_conf_t *cf)
   conf->url_format = NGX_CONF_UNSET;
   conf->secret.data = NULL;
   conf->secret.len = 0;
+  conf->prefix.data = NULL;
+  conf->prefix.len = 0;
+  conf->period = NGX_CONF_UNSET;
   return conf;
 }
 
@@ -176,15 +204,22 @@ static char * ngx_http_secure_download_merge_loc_conf (ngx_conf_t *cf, void *par
   ngx_conf_merge_value(conf->path_mode, prev->path_mode, FOLDER_MODE);
   ngx_conf_merge_value(conf->url_format, prev->url_format, URL_FORMAT_LIGHTTPD);
   ngx_conf_merge_str_value(conf->secret, prev->secret, "");
-  
+  ngx_conf_merge_str_value(conf->prefix, prev->prefix, "");
+  ngx_conf_merge_uint_value(conf->period, prev->period, 10*60*60);
+
   if (conf->enable == 1) {
       if (conf->secret.len == 0) {
           ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                "no secure_download_secret specified");
           return NGX_CONF_ERROR;
       }
+
+      if (conf->url_format == URL_FORMAT_LIGHTTPD && conf->prefix.len == 0) {
+          ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+               "no secure_download_prefix specified");
+          return NGX_CONF_ERROR;
+      }
   }
-  
   return NGX_CONF_OK;
 }
 
@@ -213,6 +248,13 @@ static ngx_int_t ngx_http_secure_download_variable(ngx_http_request_t *r, ngx_ht
       goto finish;
   }
 
+  if (!sdc->prefix_lengths || !sdc->prefix_values) {
+      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+          "securedownload: module enabled, but prefix not configured!");
+      value = -3;
+      goto finish;
+  }
+
   if (ngx_http_secure_download_split_uri(r, &sdsu) == NGX_ERROR)
   {
     ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "received an error from ngx_http_secure_download_split_uri", 0);
@@ -227,7 +269,7 @@ static ngx_int_t ngx_http_secure_download_variable(ngx_http_request_t *r, ngx_ht
     goto finish;
   }
   
-  remaining_time = timestamp - (unsigned) time(NULL);
+  remaining_time = sdc->period + timestamp - (unsigned) time(NULL);
   if ((int)remaining_time <= 0)
   {
     ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "expired timestamp", 0);
@@ -314,6 +356,39 @@ ngx_http_secure_download_secret(ngx_conf_t *cf, void *post, void *data)
 }
 ////////////////////////
 
+//////////////////////
+static char *
+ngx_http_secure_download_compile_prefix(ngx_conf_t *cf, ngx_http_secure_download_loc_conf_t *sdc)
+{
+
+    ngx_http_script_compile_t   sc;
+    ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
+
+    sc.cf = cf;
+    sc.source = &sdc->prefix;
+    sc.lengths = &sdc->prefix_lengths;
+    sc.values = &sdc->prefix_values;
+    sc.variables = ngx_http_script_variables_count(&sdc->prefix);
+    sc.complete_lengths = 1;
+    sc.complete_values = 1;
+
+    if (ngx_http_script_compile(&sc) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_http_secure_download_prefix(ngx_conf_t *cf, void *post, void *data)
+{
+    ngx_http_secure_download_loc_conf_t *sdc =
+	    ngx_http_conf_get_module_loc_conf(cf, ngx_http_secure_download_module);
+
+    return ngx_http_secure_download_compile_prefix(cf, sdc);
+}
+////////////////////////
+
 static ngx_int_t ngx_http_secure_download_check_hash(ngx_http_request_t *r, ngx_http_secure_download_split_uri_t *sdsu, ngx_str_t *secret)
 {
   int i;
@@ -322,6 +397,8 @@ static ngx_int_t ngx_http_secure_download_check_hash(ngx_http_request_t *r, ngx_
   MHASH td;
   char *hash_data, *str;
   int data_len;
+  ngx_http_secure_download_loc_conf_t *sdc;
+
 
   static const char xtoc[] = "0123456789abcdef";
 
@@ -329,22 +406,48 @@ static ngx_int_t ngx_http_secure_download_check_hash(ngx_http_request_t *r, ngx_
 
   data_len = sdsu->path_to_hash_len + secret->len + 10;
 
+  /* debug */
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "hashing string \"%s\" with len %i", sdsu->path, sdsu->path_to_hash_len);
+
   hash_data = malloc(data_len + 1);
   if (hash_data == NULL)
   {
     ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "error in allocating memory for string_to_hash.data", 0);
     return NGX_ERROR;
   }
+  
+  sdc = ngx_http_get_module_loc_conf(r, ngx_http_secure_download_module);
 
-  str = hash_data;
-  memcpy(str, sdsu->path, sdsu->path_to_hash_len);
-  str += sdsu->path_to_hash_len;
-  *str++ = '/';
-  memcpy(str, secret->data, secret->len);
-  str += secret->len;
-  *str++ = '/';
-  memcpy(str, sdsu->timestamp, 8);
-  str[8] = 0;
+  if(sdc->url_format == URL_FORMAT_LIGHTTPD) {
+      str = hash_data;
+      memcpy(str, secret->data, secret->len);
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "str is \"%s\", lenght is %d", str, secret->len);
+
+      str += secret->len;
+      //*str++ = '/';
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "str is \"%s\", lenght is %d", str, secret->len);
+
+      memcpy(str, sdsu->path, sdsu->path_to_hash_len);
+
+      str += sdsu->path_to_hash_len;
+      //*str++ = '/';
+      memcpy(str, sdsu->timestamp, 8);
+      //str[8] = 0;
+      data_len = data_len - 2;
+  
+  } else {
+
+      str = hash_data;
+      memcpy(str, sdsu->path, sdsu->path_to_hash_len);
+
+      str += sdsu->path_to_hash_len;
+      *str++ = '/';
+      memcpy(str, secret->data, secret->len);
+      str += secret->len;
+      *str++ = '/';
+      memcpy(str, sdsu->timestamp, 8);
+      str[8] = 0;
+  }
 
   td = mhash_init(MHASH_MD5);
 
@@ -380,46 +483,50 @@ static ngx_int_t ngx_http_secure_download_split_uri(ngx_http_request_t *r, ngx_h
 {
   int md5_len = 0;
   int tstamp_len = 0;
-  int prefix_len = 0;
   int pos = 0;
   int len = r->uri.len;
   const char *uri = (char*)r->uri.data;
+  
+  ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "uri: %s", uri);
 
   ngx_http_secure_download_loc_conf_t *sdc = ngx_http_get_module_loc_conf(r, ngx_http_secure_download_module);
 
   if(sdc->url_format == URL_FORMAT_LIGHTTPD) {
-      while(len && uri[++pos] != '/')
-          ++prefix;
+      ngx_str_t *prefix = &sdc->prefix;
+      pos = prefix->len;
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "prefix value is %s,  size is: %d", prefix->data, prefix->len);
 
+      sdsu->md5 = uri + pos + 1;
       while(len && uri[++pos] != '/')
           ++md5_len;
       if(md5_len != 32) {
 	      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "md5 size mismatch: %d", md5_len);
 	      return NGX_ERROR;
       }
-      sdsu->md5 = uri + pos + 1;
-      
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "md5 value is %s,  size is: %d", sdsu->md5, md5_len);
+
+      sdsu->timestamp = uri + pos + 1;
       while(len && uri[++pos] != '/')
           ++tstamp_len;
       if(tstamp_len != 8) {
 	      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "timestamp size mismatch: %d", tstamp_len);
 	      return NGX_ERROR;
       }
-      sdsu->timestamp = uri + pos + 1;
+      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "timestamp value is %s,  size is: %d, at %d", sdsu->timestamp, tstamp_len, pos);
 
-      if(len != pos) {
+      if(len == pos) {
 	      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "bad path", 0);
 	      return NGX_ERROR;
       }
 
       /* Fix-it */
-      sdsu->path = uri;
-      sdsu->path_len = len;
+      sdsu->path = uri + pos;
+      sdsu->path_len = len - pos;
 
       if(sdc->path_mode == FOLDER_MODE) {
 	      while(len && uri[--len] != '/');
       }
-      sdsu->path_to_hash_len = len;
+      sdsu->path_to_hash_len = len - pos;
 
       return NGX_OK;
   }
