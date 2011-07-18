@@ -402,9 +402,15 @@ static ngx_int_t ngx_http_secure_download_check_hash(ngx_http_request_t *r, ngx_
 
   static const char xtoc[] = "0123456789abcdef";
 
+  sdc = ngx_http_get_module_loc_conf(r, ngx_http_secure_download_module);
+
   /* rel_path_to_hash/secret/timestamp\0 */
 
-  data_len = sdsu->path_to_hash_len + secret->len + 10;
+  if(sdc->url_format == URL_FORMAT_LIGHTTPD) {
+      data_len = sdsu->path_to_hash_len + secret->len + 8;
+  } else {
+      data_len = sdsu->path_to_hash_len + secret->len + 10;
+  }
 
   /* debug */
   ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "hashing string \"%s\" with len %i", sdsu->path, sdsu->path_to_hash_len);
@@ -415,8 +421,6 @@ static ngx_int_t ngx_http_secure_download_check_hash(ngx_http_request_t *r, ngx_
     ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "error in allocating memory for string_to_hash.data", 0);
     return NGX_ERROR;
   }
-  
-  sdc = ngx_http_get_module_loc_conf(r, ngx_http_secure_download_module);
 
   if(sdc->url_format == URL_FORMAT_LIGHTTPD) {
       str = hash_data;
@@ -432,8 +436,7 @@ static ngx_int_t ngx_http_secure_download_check_hash(ngx_http_request_t *r, ngx_
       str += sdsu->path_to_hash_len;
       //*str++ = '/';
       memcpy(str, sdsu->timestamp, 8);
-      //str[8] = 0;
-      data_len = data_len - 2;
+      str[8] = 0;
   
   } else {
 
