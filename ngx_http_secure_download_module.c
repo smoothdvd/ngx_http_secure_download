@@ -13,6 +13,9 @@
 #define FOLDER_MODE 0
 #define FILE_MODE 1
 
+#define URL_FORMAT_NGINX 1
+#define URL_FORMAT_LIGHTTPD 0
+
 typedef struct {
   const char *timestamp;
   const char *md5;
@@ -36,6 +39,7 @@ static ngx_conf_post_handler_pt  ngx_http_secure_download_secret_p =
 typedef struct {
   ngx_flag_t enable;
   ngx_flag_t path_mode;
+  ngx_flag_t url_format;
   ngx_str_t secret;
   ngx_array_t  *secret_lengths;
   ngx_array_t  *secret_values;
@@ -56,6 +60,14 @@ static ngx_command_t ngx_http_secure_download_commands[] = {
     ngx_conf_set_path_mode,
     NGX_HTTP_LOC_CONF_OFFSET,
     offsetof(ngx_http_secure_download_loc_conf_t, path_mode),
+    NULL
+  },
+  {
+    ngx_string("secure_download_url_format"),
+    NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+    ngx_conf_set_url_format,
+    NGX_HTTP_LOC_CONF_OFFSET,
+    offsetof(ngx_http_secure_download_loc_conf_t, url_format),
     NULL
   },
   {
@@ -119,6 +131,26 @@ static char * ngx_conf_set_path_mode(ngx_conf_t *cf, ngx_command_t *cmd, void *c
   return NGX_CONF_OK;
 }
 
+static char * ngx_conf_set_url_format(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+  ngx_str_t *d = cf->args->elts;
+  ngx_http_secure_download_loc_conf_t *sdlc = conf;
+  if ((d[1].len == 5) && (strncmp((char*)d[1].data, "nginx", 5) == 0))
+  {
+    sdlc->path_mode = URL_FORMAT_NGINX;
+  }
+  else if((d[1].len == 8) && (strncmp((char*)d[1].data, "lighttpd", 8) == 0))
+  {
+    sdlc->path_mode = URL_FORMAT_LIGHTTPD;
+  }
+  else
+  {
+    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "secure_download_url_format should be nginx or lighttpd", 0);
+    return NGX_CONF_ERROR;
+  }
+  return NGX_CONF_OK;
+}
+
 static void * ngx_http_secure_download_create_loc_conf(ngx_conf_t *cf)
 {
   ngx_http_secure_download_loc_conf_t *conf;
@@ -129,6 +161,7 @@ static void * ngx_http_secure_download_create_loc_conf(ngx_conf_t *cf)
   }
   conf->enable = NGX_CONF_UNSET;
   conf->path_mode = NGX_CONF_UNSET;
+  conf->url_format = NGX_CONF_UNSET;
   conf->secret.data = NULL;
   conf->secret.len = 0;
   return conf;
@@ -141,6 +174,7 @@ static char * ngx_http_secure_download_merge_loc_conf (ngx_conf_t *cf, void *par
 
   ngx_conf_merge_value(conf->enable, prev->enable, 0);
   ngx_conf_merge_value(conf->path_mode, prev->path_mode, FOLDER_MODE);
+  ngx_conf_merge_value(conf->url_format, prev->url_format, URL_FORMAT_LIGHTTPD);
   ngx_conf_merge_str_value(conf->secret, prev->secret, "");
   
   if (conf->enable == 1) {
@@ -346,10 +380,49 @@ static ngx_int_t ngx_http_secure_download_split_uri(ngx_http_request_t *r, ngx_h
 {
   int md5_len = 0;
   int tstamp_len = 0;
+  int prefix_len = 0;
+  int pos = 0;
   int len = r->uri.len;
   const char *uri = (char*)r->uri.data;
 
   ngx_http_secure_download_loc_conf_t *sdc = ngx_http_get_module_loc_conf(r, ngx_http_secure_download_module);
+
+  if(sdc->url_format == URL_FORMAT_LIGHTTPD) {
+      while(len && uri[++pos] != '/')
+          ++prefix;
+
+      while(len && uri[++pos] != '/')
+          ++md5_len;
+      if(md5_len != 32) {
+	      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "md5 size mismatch: %d", md5_len);
+	      return NGX_ERROR;
+      }
+      sdsu->md5 = uri + pos + 1;
+      
+      while(len && uri[++pos] != '/')
+          ++tstamp_len;
+      if(tstamp_len != 8) {
+	      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "timestamp size mismatch: %d", tstamp_len);
+	      return NGX_ERROR;
+      }
+      sdsu->timestamp = uri + pos + 1;
+
+      if(len != pos) {
+	      ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "bad path", 0);
+	      return NGX_ERROR;
+      }
+
+      /* Fix-it */
+      sdsu->path = uri;
+      sdsu->path_len = len;
+
+      if(sdc->path_mode == FOLDER_MODE) {
+	      while(len && uri[--len] != '/');
+      }
+      sdsu->path_to_hash_len = len;
+
+      return NGX_OK;
+  }
 
   while(len && uri[--len] != '/')
 	  ++tstamp_len;
