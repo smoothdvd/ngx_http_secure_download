@@ -37,10 +37,6 @@ static char *ngx_http_secure_download_secret(ngx_conf_t *cf, void *post, void *d
 static ngx_conf_post_handler_pt  ngx_http_secure_download_secret_p =
     ngx_http_secure_download_secret;
 
-static char *ngx_http_secure_download_prefix(ngx_conf_t *cf, void *post, void *data);
-static ngx_conf_post_handler_pt  ngx_http_secure_download_prefix_p =
-    ngx_http_secure_download_prefix;
-
 typedef struct {
   ngx_flag_t enable;
   ngx_flag_t path_mode;
@@ -50,8 +46,6 @@ typedef struct {
   ngx_uint_t period;
   ngx_array_t  *secret_lengths;
   ngx_array_t  *secret_values;
-  ngx_array_t  *prefix_lengths;
-  ngx_array_t  *prefix_values;
 } ngx_http_secure_download_loc_conf_t;
 
 static ngx_command_t ngx_http_secure_download_commands[] = {
@@ -93,7 +87,7 @@ static ngx_command_t ngx_http_secure_download_commands[] = {
     ngx_conf_set_str_slot,
     NGX_HTTP_LOC_CONF_OFFSET,
     offsetof(ngx_http_secure_download_loc_conf_t, prefix),
-    &ngx_http_secure_download_prefix_p
+    NULL
   },
   {
     ngx_string("secure_download_period"),
@@ -248,7 +242,7 @@ static ngx_int_t ngx_http_secure_download_variable(ngx_http_request_t *r, ngx_ht
       goto finish;
   }
 
-  if (!sdc->prefix_lengths || !sdc->prefix_values) {
+  if (!sdc->prefix.len || !sdc->prefix.data) {
       ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
           "securedownload: module enabled, but prefix not configured!");
       value = -3;
@@ -353,39 +347,6 @@ ngx_http_secure_download_secret(ngx_conf_t *cf, void *post, void *data)
 	    ngx_http_conf_get_module_loc_conf(cf, ngx_http_secure_download_module);
 
     return ngx_http_secure_download_compile_secret(cf, sdc);
-}
-////////////////////////
-
-//////////////////////
-static char *
-ngx_http_secure_download_compile_prefix(ngx_conf_t *cf, ngx_http_secure_download_loc_conf_t *sdc)
-{
-
-    ngx_http_script_compile_t   sc;
-    ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
-
-    sc.cf = cf;
-    sc.source = &sdc->prefix;
-    sc.lengths = &sdc->prefix_lengths;
-    sc.values = &sdc->prefix_values;
-    sc.variables = ngx_http_script_variables_count(&sdc->prefix);
-    sc.complete_lengths = 1;
-    sc.complete_values = 1;
-
-    if (ngx_http_script_compile(&sc) != NGX_OK) {
-        return NGX_CONF_ERROR;
-    }
-
-    return NGX_CONF_OK;
-}
-
-static char *
-ngx_http_secure_download_prefix(ngx_conf_t *cf, void *post, void *data)
-{
-    ngx_http_secure_download_loc_conf_t *sdc =
-	    ngx_http_conf_get_module_loc_conf(cf, ngx_http_secure_download_module);
-
-    return ngx_http_secure_download_compile_prefix(cf, sdc);
 }
 ////////////////////////
 
